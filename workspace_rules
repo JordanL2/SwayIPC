@@ -1,0 +1,91 @@
+#!/usr/bin/python3
+
+import asyncio
+import json
+import signal
+import sys
+import swayipc
+
+
+workspace_rules = {
+	'1': { 'scale': 2 },
+	'2': { 'scale': 2 },
+	'3': { 'scale': 2 },
+	'4': { 'scale': 2 },
+	'5': { 'scale': 2 },
+	'6': { 'scale': 2 },
+	'7': { 'scale': 2 },
+	'8': { 'scale': 2 },
+	'9': { 'scale': 2 },
+	'10': { 'scale': 2 },
+	'Game': { 'scale': 1 },
+}
+
+
+async def shutdown(s, loop):
+	if 'connection' in state:
+		await state['connection'].close()
+	for task in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+		task.cancel()
+	loop.stop()
+
+async def main():
+
+
+	# Open subscribe IPC connection
+	state['connection'] = await swayipc.subscribe(['workspace'])
+	connection = state['connection']
+	response = await connection.receive_json()
+	if not response['success']:
+		print("Could not open IPC connection to Sway", file=sys.stderr)
+		sys.exit(1)
+
+	# Loop forever
+	try:
+		while True:
+
+			# Get events from connection
+			event = await connection.receive_json()
+
+			# Skip events that aren't focus events
+			if event['change'] != 'focus':
+				continue
+			
+			# Get list of outputs
+			outputs_info = await swayipc.get_outputs()
+			outputs = [o['name'] for o in outputs_info]
+
+			workspace = event['current']
+			name = workspace['name']
+			rules = workspace_rules[name]
+			output = workspace['output']
+			output_i = outputs.index(output)
+
+			# Scale output
+			scale = rules['scale']
+			if outputs_info[output_i]['scale'] != scale:
+				await swayipc.run_command("output {} scale {}".format(output, scale))
+
+				# Re-position all outputs to right of the output that was rescaled
+				if output_i + 1 < len(outputs):
+					outputs_info = await swayipc.get_outputs()
+					outputs_width = [o['rect']['width'] for o in outputs_info]
+					for i in range(output_i + 1, len(outputs)):
+						output_x = sum(outputs_width[0 : i])
+						if output_x > 0:
+							if outputs_info[i]['rect']['x'] != output_x:
+								await swayipc.run_command("output {} position {} 0".format(outputs[i], output_x))
+	except json.decoder.JSONDecodeError:
+		pass
+
+
+state = {}
+loop = asyncio.get_event_loop()
+signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+for s in signals:
+	loop.add_signal_handler(s, lambda s=s: asyncio.create_task(shutdown(s, loop)))
+
+try:
+	loop.run_until_complete(main())
+finally:
+	loop.close()
